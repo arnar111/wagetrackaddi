@@ -321,38 +321,66 @@ elif menu == "📊 Mælaborð":
     st.header("📈 Mælaborð & Tölfræði")
     df_wages = get_my_data("Wages")
     
-    # --- 📅 FEATURE 5: CALENDAR VIEW (VISUAL HISTORY) ---
+    # --- 📅 FEATURE 5: CALENDAR VIEW (FIXED) ---
     st.subheader("🗓️ Vinnudagar (Yfirlit)")
+    
     if not df_wages.empty and 'Date' in df_wages.columns:
-        # Prepare Data for Heatmap
+        # 1. Prepare Data
         cal_df = df_wages.copy()
-        cal_df['DateObj'] = pd.to_datetime(cal_df['Date'], errors='coerce')
+        
+        # Robust Date Parsing (Handles YYYY-MM-DD and DD/MM/YYYY)
+        cal_df['DateObj'] = pd.to_datetime(cal_df['Date'], dayfirst=True, errors='coerce')
+        
+        # Remove invalid rows
         cal_df = cal_df.dropna(subset=['DateObj'])
         
-        # Calculate Week of Year and Day of Week
-        cal_df['Week'] = cal_df['DateObj'].dt.isocalendar().week
-        cal_df['DayName'] = cal_df['DateObj'].dt.strftime("%a") # Mon, Tue...
-        cal_df['DayNum'] = cal_df['DateObj'].dt.dayofweek # 0=Mon, 6=Sun
-        
-        # Map days to Y-axis sort order (Mon at top)
-        days_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        
-        # Heatmap
-        fig_cal = go.Figure(data=go.Heatmap(
-            z=cal_df['Total'],
-            x=cal_df['Week'],
-            y=cal_df['DayName'],
-            colorscale='Greens',
-            hoverongaps=False,
-            hovertemplate='Vika %{x}, %{y}<br><b>%{z:,.0f} kr</b><extra></extra>'
-        ))
-        
-        fig_cal.update_layout(
-            title="Vinnusaga (Deokkri grænn = Hærri laun)",
-            yaxis=dict(categoryorder='array', categoryarray=days_order[::-1]), # Reverse so Mon is top
-            height=300
-        )
-        st.plotly_chart(fig_cal, use_container_width=True)
+        if not cal_df.empty:
+            # 2. Extract Calendar Info
+            cal_df['Week'] = cal_df['DateObj'].dt.isocalendar().week
+            cal_df['Year'] = cal_df['DateObj'].dt.isocalendar().year
+            cal_df['DayName'] = cal_df['DateObj'].dt.strftime("%a") # Mon, Tue...
+            
+            # Create a label for the X-axis (e.g., "2024-W52") to handle year crossovers
+            cal_df['YearWeek'] = cal_df['Year'].astype(str) + "-W" + cal_df['Week'].astype(str)
+            
+            # Ensure Total is numeric
+            cal_df['Total'] = pd.to_numeric(cal_df['Total'], errors='coerce').fillna(0)
+            
+            # 3. Pivot Data (The safest way to make a heatmap)
+            # Rows = Days, Columns = Weeks, Values = Total Pay
+            pivot_data = cal_df.pivot_table(
+                index='DayName', 
+                columns='YearWeek', 
+                values='Total', 
+                aggfunc='sum'
+            ).fillna(0)
+            
+            # Sort Days correctly (Mon -> Sun)
+            days_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            # Reindex ensures the Y-axis is always Mon-Sun, even if you didn't work on a Monday
+            pivot_data = pivot_data.reindex(days_order)
+            
+            # 4. Plot
+            if not pivot_data.empty:
+                fig_cal = px.imshow(
+                    pivot_data,
+                    labels=dict(x="Vika", y="Dagur", color="Laun"),
+                    x=pivot_data.columns,
+                    y=pivot_data.index,
+                    color_continuous_scale="Greens",
+                    aspect="auto" # Stretches to fill width
+                )
+                
+                fig_cal.update_layout(
+                    height=300,
+                    margin=dict(l=20, r=20, t=20, b=20),
+                    yaxis=dict(autorange="reversed") # Put Mon at top
+                )
+                st.plotly_chart(fig_cal, use_container_width=True)
+            else:
+                st.warning("Engin gögn fundust eftir úrvinnslu.")
+        else:
+            st.warning("Gat ekki lesið dagsetningar. Athugaðu 'Date' dálkinn í Gagnagrunni.")
     else:
         st.info("Vantar gögn fyrir dagatal.")
 
@@ -372,7 +400,8 @@ elif menu == "📊 Mælaborð":
                 c3.metric("Unnir tímar", f"{tot_hours:.1f}"); c4.metric("Vaktir", len(m_data))
                 st.progress(min(1.0, tot_pay/monthly_goal))
                 if 'Date' in m_data.columns:
-                    m_data['DateObj'] = pd.to_datetime(m_data['Date'])
+                    # Fix chart date parsing here too
+                    m_data['DateObj'] = pd.to_datetime(m_data['Date'], dayfirst=True, errors='coerce')
                     m_data = m_data.sort_values('DateObj')
                     fig = px.bar(m_data, x='Date', y=['Wage', 'Bonus'], title="Dagleg laun", color_discrete_map={'Wage': '#29B6F6', 'Bonus': '#66BB6A'})
                     st.plotly_chart(fig, use_container_width=True)
