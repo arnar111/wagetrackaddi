@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
+import json
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -30,7 +31,6 @@ st.markdown("""
         color: #00C853; 
         font-weight: 600;
     }
-    /* Card-like containers for cleaner look */
     div.stDataFrame {
         border: 1px solid #f0f2f6;
         border-radius: 8px;
@@ -50,40 +50,58 @@ MONTH_MAP = {
     7: "Júl", 8: "Ágú", 9: "Sep", 10: "Okt", 11: "Nóv", 12: "Des"
 }
 
-# --- GOOGLE SHEETS CONNECTION (FIXED) ---
+# --- GOOGLE SHEETS CONNECTION (ROBUST JSON METHOD) ---
 @st.cache_resource
 def get_gsheet_client():
-    # 1. Load secrets as a standard dictionary
-    secrets = dict(st.secrets["gcp_service_account"])
-    
-    # 2. THE FIX: Manually replace escaped newlines with actual newlines
-    # This repairs the private_key string if TOML formatted it incorrectly
-    if "private_key" in secrets:
-        secrets["private_key"] = secrets["private_key"].replace("\\n", "\n")
+    try:
+        # Check if we are using the new "Foolproof" JSON string method
+        if "google_credentials_json" in st.secrets:
+            # Parse the raw JSON string directly
+            secrets = json.loads(st.secrets["google_credentials_json"])
+        
+        # Fallback to the old method (in case you kept the old format)
+        elif "gcp_service_account" in st.secrets:
+            secrets = dict(st.secrets["gcp_service_account"])
+            if "private_key" in secrets:
+                secrets["private_key"] = secrets["private_key"].replace("\\n", "\n")
+        else:
+            st.error("❌ Engin lykilorð fundust í Secrets! (No credentials found)")
+            return None
 
-    # 3. Authenticate
-    creds = Credentials.from_service_account_info(
-        secrets,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    return gspread.authorize(creds)
+        # Authenticate
+        creds = Credentials.from_service_account_info(
+            secrets,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error(f"❌ Villa við tengingu: {e}")
+        return None
 
 def get_data(worksheet_name):
     """Fetch all data from a specific worksheet."""
     try:
         client = get_gsheet_client()
+        if not client: return pd.DataFrame()
+        
         sheet = client.open(SHEET_NAME)
         ws = sheet.worksheet(worksheet_name)
         data = ws.get_all_records()
         return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Villa við að sækja gögn: {e}")
+        # Show a friendly error if the sheet is empty or not found
+        if "WorksheetNotFound" in str(e):
+            st.error(f"Fann ekki flipann '{worksheet_name}'. Athugaðu nafnið í Google Sheets.")
+        else:
+            st.warning(f"Gat ekki sótt gögn úr '{worksheet_name}'. (Er skjalið tómt?)")
         return pd.DataFrame()
 
 def append_row(worksheet_name, row_data):
     """Append a list of values as a new row."""
     try:
         client = get_gsheet_client()
+        if not client: return False
+        
         sheet = client.open(SHEET_NAME)
         ws = sheet.worksheet(worksheet_name)
         ws.append_row(row_data)
@@ -99,7 +117,6 @@ def get_wage_month(date_obj):
             date_obj = datetime.strptime(date_obj, "%Y-%m-%d")
         except:
             return "Unknown"
-            
     # If 26th or later, it's the NEXT month
     if date_obj.day >= 26:
         next_month = date_obj.replace(day=1) + timedelta(days=32)
@@ -116,7 +133,7 @@ def calculate_pay(day_h, eve_h, sales):
 # --- SIDEBAR NAVIGATION ---
 with st.sidebar:
     st.title("💎 Launa CRM")
-    st.caption("v2.0 - Google Sheets Edition")
+    st.caption("v2.1 - Robust Edition")
     
     menu = st.radio("Valmynd", [
         "🔥 Dagurinn í dag (Live)", 
@@ -136,12 +153,12 @@ if menu == "🔥 Dagurinn í dag (Live)":
     
     # 1. Fetch Sales for Today
     df_sales = get_data("Sales")
-    if not df_sales.empty:
+    today_sales = pd.DataFrame()
+    
+    if not df_sales.empty and 'Timestamp' in df_sales.columns:
         df_sales['Timestamp'] = pd.to_datetime(df_sales['Timestamp'])
         today_str = datetime.now().strftime("%Y-%m-%d")
         today_sales = df_sales[df_sales['Timestamp'].dt.strftime("%Y-%m-%d") == today_str].copy()
-    else:
-        today_sales = pd.DataFrame()
 
     # 2. Metrics
     current_sales = today_sales['Amount'].sum() if not today_sales.empty else 0
@@ -189,8 +206,6 @@ if menu == "🔥 Dagurinn í dag (Live)":
             use_container_width=True,
             hide_index=True
         )
-    else:
-        st.info("Engar sölur skráðar í dag.")
 
 # --- 2. MAIN STATS DASHBOARD ---
 elif menu == "📊 Mælaborð (Stats)":
@@ -258,7 +273,7 @@ elif menu == "📝 Skrá Vakt (End Shift)":
     today_str = datetime.now().strftime("%Y-%m-%d")
     auto_sales = 0
     
-    if not df_sales.empty:
+    if not df_sales.empty and 'Timestamp' in df_sales.columns:
         df_sales['Timestamp'] = pd.to_datetime(df_sales['Timestamp'])
         # Filter sales that happened today
         mask = df_sales['Timestamp'].dt.strftime("%Y-%m-%d") == today_str
@@ -318,8 +333,7 @@ elif menu == "💾 Gagnagrunnur":
     
     with tab1:
         df_w = get_data("Wages")
-        if not df_w.empty:
-            # Sort by Date descending
+        if not df_w.empty and 'Sales' in df_w.columns:
             if 'Date' in df_w.columns:
                 df_w = df_w.sort_values('Date', ascending=False)
                 
@@ -339,9 +353,8 @@ elif menu == "💾 Gagnagrunnur":
                 num_rows="dynamic",
                 key="wages_editor"
             )
-            st.caption("Ath: Breytingar hér vistast ekki sjálfkrafa í Google Sheets í þessari útgáfu (Read-only view).")
         else:
-            st.warning("Engin gögn í 'Wages' flipanum.")
+            st.warning("Engin gögn í 'Wages' flipanum (eða dálka vantar).")
 
     with tab2:
         df_s = get_data("Sales")
