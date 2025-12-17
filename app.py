@@ -3,59 +3,57 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import os
+import gspread
+from google.oauth2.service_account import Credentials
 
-# --- PAGE CONFIGURATION ---
-st.set_page_config(
-    page_title="Launa CRM",
-    page_icon="💰",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Launa CRM Pro", page_icon="💎", layout="wide")
 
-# --- CUSTOM STYLING (CSS) ---
-# This injects CSS to give it that "Sleek CRM" card look
+# --- STYLE ---
 st.markdown("""
 <style>
-    [data-testid="stMetricValue"] {
-        font-size: 24px;
-        color: #00CC96;
-    }
-    div.stButton > button {
-        width: 100%;
-        border-radius: 5px;
-        height: 3em;
-        background-color: #4CAF50; 
-        color: white;
-    }
-    .main {
-        background-color: #f5f5f5;
-    }
-    /* Card styling for containers */
-    div.css-1r6slb0 {
-        background-color: white;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
+    div.stButton > button {width: 100%; border-radius: 8px; height: 3.5em; font-weight: bold;}
+    .big-font {font-size:20px !important;}
+    [data-testid="stMetricValue"] {font-size: 32px; color: #00C853;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONFIGURATION & CONSTANTS ---
+# --- CONSTANTS ---
 RATE_DAY = 2797.0
 RATE_EVE = 3768.47
 DEDUCTION_RATE = 636.0
 OFFSET_HOURS = 1.0
-DATA_FILE = 'wage_data.csv'
+SHEET_NAME = "Launa_DB"  # The name of your Google Sheet
+MONTH_MAP = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "Maí", 6: "Jún", 7: "Júl", 8: "Ágú", 9: "Sep", 10: "Okt", 11: "Nóv", 12: "Des"}
 
-MONTH_MAP = {
-    1: "Janúar", 2: "Febrúar", 3: "Mars", 4: "Apríl", 5: "Maí", 6: "Júní",
-    7: "Júlí", 8: "Ágúst", 9: "September", 10: "Október", 11: "Nóvember", 12: "Desember"
-}
+# --- GOOGLE SHEETS CONNECTION ---
+@st.cache_resource
+def get_gsheet_client():
+    # Load secrets
+    secrets = st.secrets["gcp_service_account"]
+    creds = Credentials.from_service_account_info(
+        secrets,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return gspread.authorize(creds)
 
-# --- LOGIC FUNCTIONS ---
+def get_data(worksheet_name):
+    client = get_gsheet_client()
+    sheet = client.open(SHEET_NAME)
+    ws = sheet.worksheet(worksheet_name)
+    data = ws.get_all_records()
+    return pd.DataFrame(data)
+
+def append_row(worksheet_name, row_data):
+    client = get_gsheet_client()
+    sheet = client.open(SHEET_NAME)
+    ws = sheet.worksheet(worksheet_name)
+    ws.append_row(row_data)
+
+# --- LOGIC ---
 def get_wage_month(date_obj):
-    # If 26th or later, it's the NEXT month
+    if isinstance(date_obj, str):
+        date_obj = datetime.strptime(date_obj, "%Y-%m-%d")
     if date_obj.day >= 26:
         next_month = date_obj.replace(day=1) + timedelta(days=32)
         return f"{next_month.year}-{next_month.month:02d} ({MONTH_MAP[next_month.month]})"
@@ -68,154 +66,182 @@ def calculate_pay(day_h, eve_h, sales):
     bonus = max(0, sales - threshold)
     return wages, bonus, (wages + bonus)
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return pd.DataFrame(columns=['Date', 'DayHrs', 'EveHrs', 'Sales', 'Wage', 'Bonus', 'Total', 'WageMonth'])
-    return pd.read_csv(DATA_FILE)
-
-def save_data(df):
-    df.to_csv(DATA_FILE, index=False)
-
-# --- SIDEBAR NAVIGATION ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.title("📊 Launa CRM")
+    st.title("💎 Launa CRM")
+    menu = st.radio("Valmynd", ["🔥 Dagurinn í dag (Live)", "📊 Mælaborð (Stats)", "📝 Skrá Vakt (End Shift)", "💾 Gagnagrunnur"])
     st.markdown("---")
-    menu = st.radio("Valmynd", ["Mælaborð (Dashboard)", "Skrá nýja vakt", "Gagnagrunnur"])
-    st.markdown("---")
-    
-    # Monthly Goal Setting
-    st.subheader("🎯 Mánaðarlegt Markmið")
-    monthly_goal = st.number_input("Launamarkmið (kr)", value=500000, step=10000)
+    daily_goal = st.number_input("Daglegt Sölumarkmið:", value=150000, step=10000)
+    monthly_goal = st.number_input("Mánaðarlegt Launamarkmið:", value=600000, step=50000)
 
-# --- MAIN APP LOGIC ---
-df = load_data()
-
-# 1. DASHBOARD PAGE
-if menu == "Mælaborð (Dashboard)":
-    st.header("📈 Yfirlit & Tölfræði")
+# --- 1. LIVE DAY DASHBOARD ---
+if menu == "🔥 Dagurinn í dag (Live)":
+    st.header(f"📅 Dagurinn í dag: {datetime.now().strftime('%d. %B')}")
     
-    if df.empty:
-        st.info("Engin gögn fundust. Byrjaðu á að skrá vakt í valmyndinni.")
+    # 1. Fetch Sales for Today
+    try:
+        df_sales = get_data("Sales")
+        if not df_sales.empty:
+            df_sales['Timestamp'] = pd.to_datetime(df_sales['Timestamp'])
+            # Filter for today
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_sales = df_sales[df_sales['Timestamp'].dt.strftime("%Y-%m-%d") == today_str]
+        else:
+            today_sales = pd.DataFrame()
+    except Exception as e:
+        st.error(f"Gat ekki sótt gögn: {e}")
+        today_sales = pd.DataFrame()
+
+    # 2. Metrics
+    current_sales = today_sales['Amount'].sum() if not today_sales.empty else 0
+    sales_count = len(today_sales)
+    
+    # Progress towards daily goal
+    prog = min(1.0, current_sales / daily_goal) if daily_goal > 0 else 0
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💰 Sala í dag", f"{current_sales:,.0f} kr", f"{current_sales-daily_goal:,.0f} kr frá markmiði")
+    col2.metric("📦 Fjöldi sala", sales_count)
+    col3.metric("🎯 Dagsskilvirkni", f"{prog*100:.0f}%")
+    
+    st.progress(prog)
+
+    # 3. Add New Sale Form
+    st.markdown("### ➕ Skrá nýja sölu")
+    with st.form("add_sale"):
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            sale_amount = st.number_input("Upphæð (kr)", min_value=0, step=1000, value=0)
+        with c2:
+            sale_note = st.text_input("Skýring (Valfrjálst)")
+        
+        if st.form_submit_button("Staðfesta Sölu"):
+            if sale_amount > 0:
+                now = datetime.now()
+                # Append to Google Sheet "Sales" tab
+                row = [str(now), now.strftime("%H:%M"), sale_amount, sale_note]
+                append_row("Sales", row)
+                st.success(f"✅ Sala skráð: {sale_amount} kr")
+                st.rerun() # Refresh to update numbers immediately
+            else:
+                st.warning("Upphæð verður að vera hærri en 0.")
+
+    # 4. Recent Transactions Table
+    if not today_sales.empty:
+        st.markdown("### 🕒 Sölusaga í dag")
+        st.dataframe(
+            today_sales[['Time', 'Amount', 'Note']].sort_values('Time', ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
+
+# --- 2. MAIN STATS DASHBOARD ---
+elif menu == "📊 Mælaborð (Stats)":
+    st.header("📈 Yfirlit Launa")
+    df_wages = get_data("Wages")
+    
+    if df_wages.empty:
+        st.info("Engin launagögn skráð ennþá.")
     else:
-        # Filter by Month
-        all_months = sorted(df['WageMonth'].unique().tolist(), reverse=True)
-        selected_month = st.selectbox("Veldu Launatímabil:", all_months)
+        # Month Filter
+        all_months = sorted(df_wages['WageMonth'].unique().tolist(), reverse=True)
+        sel_month = st.selectbox("Veldu Tímabil:", all_months)
         
-        # Filter Data
-        month_data = df[df['WageMonth'] == selected_month]
+        m_data = df_wages[df_wages['WageMonth'] == sel_month]
         
-        if not month_data.empty:
-            # CALCULATIONS
-            total_pay = month_data['Total'].sum()
-            total_bonus = month_data['Bonus'].sum()
-            total_hours = month_data['DayHrs'].sum() + month_data['EveHrs'].sum()
-            avg_hourly = total_pay / total_hours if total_hours > 0 else 0
+        if not m_data.empty:
+            tot_pay = m_data['Total'].sum()
+            tot_bonus = m_data['Bonus'].sum()
+            tot_sales = m_data['Sales'].sum()
             
-            # --- TOP METRICS ROW ---
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Heildarlaun", f"{total_pay:,.0f} kr", delta=f"{total_pay/monthly_goal*100:.1f}% af markmiði")
-            col2.metric("Bónusar", f"{total_bonus:,.0f} kr", delta_color="off")
-            col3.metric("Unnir tímar", f"{total_hours:.1f} klst")
-            col4.metric("Meðallaun/klst", f"{avg_hourly:,.0f} kr")
+            # Big Cards
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Heildarlaun", f"{tot_pay:,.0f}", help="Grunnlaun + Bónus")
+            c2.metric("Bónusar", f"{tot_bonus:,.0f}", delta=f"{tot_bonus/tot_pay*100:.0f}% af launum")
+            c3.metric("Heildarsala", f"{tot_sales:,.0f}")
+            c4.metric("Vaktir", len(m_data))
             
-            # --- PROGRESS BAR ---
-            st.write(f"Markmið: {monthly_goal:,.0f} kr")
-            progress = min(1.0, total_pay / monthly_goal)
-            st.progress(progress)
+            st.write(f"Mánaðarmarkmið: {monthly_goal:,.0f} kr")
+            st.progress(min(1.0, tot_pay/monthly_goal))
             
-            # --- CHARTS ROW ---
-            c1, c2 = st.columns([2, 1])
-            
-            with c1:
-                st.subheader("Launa Samsetning")
-                # Prepare data for stacked bar
-                chart_data = month_data.copy()
-                chart_data['Date'] = pd.to_datetime(chart_data['Date'])
-                chart_data = chart_data.sort_values('Date')
-                
-                fig = px.bar(chart_data, x='Date', y=['Wage', 'Bonus'], 
-                             title="Dagleg laun (Grunnlaun vs Bónus)",
-                             labels={'value': 'Krónur', 'variable': 'Tegund'},
-                             color_discrete_map={'Wage': '#2E86C1', 'Bonus': '#28B463'})
+            # Charts
+            col_chart1, col_chart2 = st.columns([2,1])
+            with col_chart1:
+                # Wages over time area chart
+                m_data['Date'] = pd.to_datetime(m_data['Date'])
+                m_data = m_data.sort_values('Date')
+                fig = px.area(m_data, x='Date', y=['Wage', 'Bonus'], title="Launaþróun yfir mánuðinn",
+                              color_discrete_map={'Wage': '#29B6F6', 'Bonus': '#66BB6A'})
                 st.plotly_chart(fig, use_container_width=True)
-                
-            with c2:
-                st.subheader("Hlutfall Bónusa")
-                wage_share = month_data['Wage'].sum()
-                bonus_share = month_data['Bonus'].sum()
-                
-                fig_pie = px.donut(values=[wage_share, bonus_share], names=['Grunnlaun', 'Bónus'], 
-                                   color_discrete_sequence=['#2E86C1', '#28B463'], hole=0.4)
-                st.plotly_chart(fig_pie, use_container_width=True)
-
-# 2. ENTRY PAGE
-elif menu == "Skrá nýja vakt":
-    st.header("📝 Skráning Vaktar")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        with st.form("entry_form"):
-            date_input = st.date_input("Dagsetning")
-            day_hrs = st.number_input("Dagvinna (klst)", min_value=0.0, step=0.5)
-            eve_hrs = st.number_input("Kvöldvinna (klst)", min_value=0.0, step=0.5)
-            sales = st.number_input("Sala (kr)", min_value=0, step=1000)
             
-            submitted = st.form_submit_button("💾 Vista Vakt")
-            
-            if submitted:
-                # Calc
-                w, b, t = calculate_pay(day_hrs, eve_hrs, sales)
-                w_month = get_wage_month(date_input)
-                
-                new_row = {
-                    'Date': date_input,
-                    'DayHrs': day_hrs, 
-                    'EveHrs': eve_hrs, 
-                    'Sales': sales,
-                    'Wage': w, 
-                    'Bonus': b, 
-                    'Total': t,
-                    'WageMonth': w_month
-                }
-                
-                # Update DF
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                save_data(df)
-                st.success(f"Vakt skráð! Heildarlaun: {t:,.0f} kr")
-                
-    with col2:
-        # Live Calculator Preview
-        st.info("💡 Reiknivél (Preview)")
-        calc_w, calc_b, calc_t = calculate_pay(day_hrs, eve_hrs, sales)
-        st.markdown(f"""
-        **Áætluð laun fyrir þessa vakt:**
-        * Grunnlaun: {calc_w:,.0f} kr
-        * Bónus: {calc_b:,.0f} kr
-        * **Samtals: {calc_t:,.0f} kr**
-        """)
+            with col_chart2:
+                # Gauge Chart for Average Wage
+                avg_wage = m_data['Total'].mean()
+                fig_g = go.Figure(go.Indicator(
+                    mode = "gauge+number",
+                    value = avg_wage,
+                    title = {'text': "Meðallaun per vakt"},
+                    gauge = {'axis': {'range': [None, 50000]}, 'bar': {'color': "#00C853"}}
+                ))
+                st.plotly_chart(fig_g, use_container_width=True)
 
-# 3. DATABASE PAGE
-elif menu == "Gagnagrunnur":
-    st.header("📋 Öll Gögn")
+# --- 3. END SHIFT (WAGE ENTRY) ---
+elif menu == "📝 Skrá Vakt (End Shift)":
+    st.header("🏁 Loka Vakt & Reikna Laun")
     
-    # Download Button
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Sækja Excel/CSV", data=csv, file_name="laun_gogn.csv", mime="text/csv")
+    # Auto-fetch today's sales
+    df_sales = get_data("Sales")
+    today_str = datetime.now().strftime("%Y-%m-%d")
     
-    # Editable Dataframe
-    st.markdown("Hér getur þú breytt eða eytt færslum (hakaðu við til að eyða).")
+    if not df_sales.empty:
+        df_sales['Timestamp'] = pd.to_datetime(df_sales['Timestamp'])
+        # Calculate sum for the default date
+        auto_sales = df_sales[df_sales['Timestamp'].dt.strftime("%Y-%m-%d") == today_str]['Amount'].sum()
+    else:
+        auto_sales = 0
+        
+    with st.form("shift_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            date_in = st.date_input("Dagsetning", value=datetime.now())
+            sales_in = st.number_input("Heildarsala (kr)", value=int(auto_sales), step=1000, help="Sækir sjálfkrafa sölu dagsins úr Live kerfinu")
+        with col2:
+            d_hrs = st.number_input("Dagvinna (klst)", step=0.5)
+            e_hrs = st.number_input("Kvöldvinna (klst)", step=0.5)
+            
+        submit = st.form_submit_button("💾 Vista Vakt í Grunn")
+        
+        if submit:
+            w, b, t = calculate_pay(d_hrs, e_hrs, sales_in)
+            w_month = get_wage_month(date_in)
+            
+            row_data = [
+                str(date_in), d_hrs, e_hrs, sales_in, w, b, t, w_month
+            ]
+            append_row("Wages", row_data)
+            st.balloons()
+            st.success(f"Vakt vistuð! Þú þénaðir {t:,.0f} kr í dag.")
+
+# --- 4. DATABASE (Fancy View) ---
+elif menu == "💾 Gagnagrunnur":
+    st.header("🗄️ Gagnagrunnur (Google Sheets)")
     
-    # Show data with latest first
-    edited_df = st.data_editor(
-        df.sort_index(ascending=False), 
-        num_rows="dynamic",
-        use_container_width=True
-    )
+    tab1, tab2 = st.tabs(["💰 Launaskrá", "🧾 Söluyfirlit"])
     
-    # Save changes logic (if edited)
-    if not edited_df.equals(df.sort_index(ascending=False)):
-        # Re-sort to original before saving to maintain order logic if needed
-        # But usually we just overwrite
-        save_data(edited_df.sort_index())
-        st.toast("Breytingar vistaðar!", icon="✅")
+    with tab1:
+        df_w = get_data("Wages")
+        st.data_editor(
+            df_w,
+            column_config={
+                "Total": st.column_config.NumberColumn("Heildarlaun", format="%d kr"),
+                "Bonus": st.column_config.NumberColumn("Bónus", format="%d kr"),
+                "Sales": st.column_config.ProgressColumn("Sala", format="%f", min_value=0, max_value=df_w['Sales'].max() if not df_w.empty else 100000),
+            },
+            use_container_width=True,
+            num_rows="dynamic"
+        )
+        st.caption("Breytingar hér vistast ekki sjálfkrafa í Excel. (Google Sheets API limit).")
+
+    with tab2:
+        df_s = get_data("Sales")
+        st.dataframe(df_s.sort_values("Timestamp", ascending=False), use_container_width=True)
