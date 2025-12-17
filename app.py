@@ -25,7 +25,6 @@ st.markdown("""
         background-color: white; padding: 20px; border-radius: 10px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px;
     }
-    /* Bonus Meter Styling */
     .stProgress > div > div > div > div {
         background-color: #00C853;
     }
@@ -180,7 +179,7 @@ if not st.session_state.logged_in:
                     st.error("Rangt númer.")
     st.stop() 
 
-# --- HELPER: GET DATA ---
+# --- HELPER: GET DATA (MOVED HERE TO FIX NAME ERROR) ---
 def get_my_data(tab_name):
     df = get_data_with_index(tab_name)
     if df.empty: return df
@@ -201,5 +200,260 @@ with st.sidebar:
     st.caption(f"ID: {st.session_state.user_code}")
     
     # 🏆 FEATURE 4: PERSONAL BEST (Gamification)
-    # We calculate this once on load
-    df_all_wages = ge
+    # Now this works because get_my_data is defined above!
+    df_all_wages = get_my_data("Wages")
+    if not df_all_wages.empty:
+        best_pay = df_all_wages['Total'].max()
+        best_sale = df_all_wages['Sales'].max()
+        
+        st.markdown("---")
+        st.markdown("### 🏆 Þín Met")
+        c1, c2 = st.columns(2)
+        c1.metric("Besta Vakt", f"{best_pay/1000:.1f}k")
+        c2.metric("Besta Sala", f"{best_sale/1000:.1f}k")
+    
+    st.markdown("---")
+    menu = st.radio("Valmynd", ["🔥 Dagurinn í dag", "📊 Mælaborð", "💰 Launaseðill", "💾 Gagnagrunnur"])
+    
+    st.markdown("---")
+    daily_goal = st.number_input("Dagsmarkmið:", value=150000, step=10000)
+    monthly_goal = st.number_input("Mánaðarmarkmið:", value=600000, step=50000)
+    
+    st.markdown("---")
+    if st.button("🚪 Útskráning"):
+        st.session_state.logged_in = False; st.rerun()
+
+# --- 1. LIVE DAY ---
+if menu == "🔥 Dagurinn í dag":
+    st.header(f"📅 Vaktin í dag: {datetime.now().strftime('%d. %B')}")
+    
+    # FETCH DATA
+    df_sales = get_my_data("Sales")
+    today_sales = pd.DataFrame()
+    
+    if not df_sales.empty and 'Timestamp' in df_sales.columns:
+        df_sales['TimestampObj'] = pd.to_datetime(df_sales['Timestamp'], errors='coerce')
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_sales = df_sales[df_sales['TimestampObj'].dt.strftime("%Y-%m-%d") == today_str].copy()
+
+    # METRICS
+    cur_sales = today_sales['Amount'].sum() if not today_sales.empty else 0
+    sale_count = len(today_sales)
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("💰 Sala í dag", f"{cur_sales:,.0f}")
+    m2.metric("📦 Fjöldi sala", sale_count)
+    
+    prog = min(1.0, cur_sales/daily_goal) if daily_goal > 0 else 0
+    m3.metric("🎯 Markmið", f"{prog*100:.0f}%")
+    st.progress(prog)
+    
+    st.markdown("---")
+    
+    # --- BONUS THRESHOLD METER ---
+    with st.container():
+        st.subheader("🎯 Bónus-mælir")
+        st.caption("Hvað ætlar þú að vinna lengi í dag?")
+        est_hours = st.slider("Áætluð vaktlengd (klst):", min_value=3.0, max_value=8.0, value=5.0, step=0.5)
+        
+        threshold_cost = max(0, (est_hours - OFFSET_HOURS) * DEDUCTION_RATE)
+        gap = threshold_cost - cur_sales
+        
+        col_bar, col_txt = st.columns([3, 1])
+        with col_bar:
+            if threshold_cost > 0:
+                bonus_prog = min(1.0, cur_sales / threshold_cost)
+                st.progress(bonus_prog)
+            else:
+                st.progress(1.0)
+        with col_txt:
+            if gap > 0:
+                st.markdown(f"🔒 Vantar **{gap:,.0f} kr**")
+            else:
+                st.success("🔓 Bónus virkur!")
+
+    st.markdown("---")
+    
+    # SALES ENTRY
+    c_left, c_right = st.columns([1, 1])
+    with c_left:
+        st.subheader("➕ Skrá sölu")
+        with st.form("add_sale_form", clear_on_submit=True):
+            c1, c2 = st.columns([2,1])
+            amt = c1.number_input("Upphæð (kr)", step=1000, min_value=0)
+            note = c2.text_input("Skýring")
+            if st.form_submit_button("💾 Vista Sölu", type="primary"):
+                if amt > 0:
+                    now = datetime.now()
+                    row = [st.session_state.user_code, str(now), now.strftime("%H:%M"), amt, note]
+                    append_row("Sales", row)
+                    st.toast(f"Sala skráð: {amt:,.0f} kr", icon="✅")
+                    time.sleep(1); st.rerun()
+    
+    with c_right:
+        st.subheader("📝 Nýlegar færslur")
+        if not today_sales.empty:
+            st.dataframe(today_sales[['Time', 'Amount', 'Note']].sort_values('Time', ascending=False), use_container_width=True, hide_index=True)
+        else:
+            st.info("Engar sölur skráðar í dag.")
+
+    st.markdown("---")
+    st.header("🏁 Loka Vakt")
+    with st.container():
+        with st.form("end_shift_form"):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                date_in = st.date_input("Dagsetning", value=datetime.now())
+                final_sales = st.number_input("Heildarsala (Sjálfvirkt)", value=int(cur_sales), step=1000)
+            with col_b:
+                d_hrs = st.number_input("Dagvinna (klst)", step=0.5, min_value=0.0)
+                e_hrs = st.number_input("Kvöldvinna (klst)", step=0.5, min_value=0.0)
+            
+            if st.form_submit_button("💾 Loka Vakt & Vista Laun"):
+                w, b, t = calculate_pay(d_hrs, e_hrs, final_sales)
+                mon = get_wage_month(date_in)
+                row = [st.session_state.user_code, str(date_in), d_hrs, e_hrs, final_sales, w, b, t, mon]
+                append_row("Wages", row)
+                st.balloons(); st.success(f"Vakt vistuð! {t:,.0f} kr."); time.sleep(2); st.rerun()
+
+# --- 2. STATS ---
+elif menu == "📊 Mælaborð":
+    st.header("📈 Mælaborð & Tölfræði")
+    df_wages = get_my_data("Wages")
+    
+    # --- 📅 FEATURE 5: CALENDAR VIEW (VISUAL HISTORY) ---
+    st.subheader("🗓️ Vinnudagar (Yfirlit)")
+    if not df_wages.empty and 'Date' in df_wages.columns:
+        # Prepare Data for Heatmap
+        cal_df = df_wages.copy()
+        cal_df['DateObj'] = pd.to_datetime(cal_df['Date'], errors='coerce')
+        cal_df = cal_df.dropna(subset=['DateObj'])
+        
+        # Calculate Week of Year and Day of Week
+        cal_df['Week'] = cal_df['DateObj'].dt.isocalendar().week
+        cal_df['DayName'] = cal_df['DateObj'].dt.strftime("%a") # Mon, Tue...
+        cal_df['DayNum'] = cal_df['DateObj'].dt.dayofweek # 0=Mon, 6=Sun
+        
+        # Map days to Y-axis sort order (Mon at top)
+        days_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        
+        # Heatmap
+        fig_cal = go.Figure(data=go.Heatmap(
+            z=cal_df['Total'],
+            x=cal_df['Week'],
+            y=cal_df['DayName'],
+            colorscale='Greens',
+            hoverongaps=False,
+            hovertemplate='Vika %{x}, %{y}<br><b>%{z:,.0f} kr</b><extra></extra>'
+        ))
+        
+        fig_cal.update_layout(
+            title="Vinnusaga (Deokkri grænn = Hærri laun)",
+            yaxis=dict(categoryorder='array', categoryarray=days_order[::-1]), # Reverse so Mon is top
+            height=300
+        )
+        st.plotly_chart(fig_cal, use_container_width=True)
+    else:
+        st.info("Vantar gögn fyrir dagatal.")
+
+    st.divider()
+
+    # --- STANDARD STATS ---
+    if not df_wages.empty and 'WageMonth' in df_wages.columns:
+        months = sorted(df_wages['WageMonth'].unique().tolist(), reverse=True)
+        sel_m = st.selectbox("Veldu Mánuð", months) if months else None
+        if sel_m:
+            m_data = df_wages[df_wages['WageMonth'] == sel_m]
+            if not m_data.empty:
+                tot_pay = m_data['Total'].sum(); tot_bonus = m_data['Bonus'].sum()
+                tot_hours = m_data['DayHrs'].sum() + m_data['EveHrs'].sum()
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Heildarlaun", f"{tot_pay:,.0f}"); c2.metric("Bónusar", f"{tot_bonus:,.0f}")
+                c3.metric("Unnir tímar", f"{tot_hours:.1f}"); c4.metric("Vaktir", len(m_data))
+                st.progress(min(1.0, tot_pay/monthly_goal))
+                if 'Date' in m_data.columns:
+                    m_data['DateObj'] = pd.to_datetime(m_data['Date'])
+                    m_data = m_data.sort_values('DateObj')
+                    fig = px.bar(m_data, x='Date', y=['Wage', 'Bonus'], title="Dagleg laun", color_discrete_map={'Wage': '#29B6F6', 'Bonus': '#66BB6A'})
+                    st.plotly_chart(fig, use_container_width=True)
+            else: st.info("Engin gögn.")
+    else: st.info("Engin launagögn fundust.")
+
+# --- 3. PAYSLIP ---
+elif menu == "💰 Launaseðill":
+    st.header("🧾 Reiknivél")
+    df_wages = get_my_data("Wages")
+    if not df_wages.empty and 'WageMonth' in df_wages.columns:
+        months = sorted(df_wages['WageMonth'].unique().tolist(), reverse=True)
+        sel_m = st.selectbox("Veldu Launatímabil", months)
+        if sel_m:
+            m_data = df_wages[df_wages['WageMonth'] == sel_m]
+            total_gross = m_data['Total'].sum()
+            use_allowance = st.toggle("Nota Persónuafslátt? (100%)", value=True)
+            pd_tax = calculate_net_salary(total_gross, 1.0 if use_allowance else 0.0)
+            
+            cL, cR = st.columns(2)
+            with cL:
+                st.subheader("Laun")
+                st.write(f"Heildarlaun: **{pd_tax['gross']:,.0f} kr**")
+                st.write(f"Lífeyrissjóður: -{pd_tax['pension']:,.0f} kr")
+                st.write(f"Stéttarfélag: -{pd_tax['union']:,.0f} kr")
+                st.write(f"Skattstofn: {pd_tax['tax_base']:,.0f} kr")
+            with cR:
+                st.subheader("Skattar")
+                st.write(f"Reiknaður skattur: {pd_tax['income_tax_calc']:,.0f} kr")
+                st.write(f"Persónuafsláttur: -{pd_tax['allowance']:,.0f} kr")
+                st.write(f"Skattur til greiðslu: {pd_tax['final_tax']:,.0f} kr")
+            st.divider()
+            st.metric("💵 ÚTBORGAÐ", f"{pd_tax['net_salary']:,.0f} kr")
+    else: st.info("Engin gögn.")
+
+# --- 4. DB (EDITABLE) ---
+elif menu == "💾 Gagnagrunnur":
+    st.header("🗄️ Breyta Gögnum")
+    st.info("Hér getur þú breytt tölum eða eytt línum. Laun uppfærast sjálfkrafa við vistun.")
+
+    tab1, tab2 = st.tabs(["Laun (Wages)", "Sala (Sales)"])
+    
+    with tab1:
+        df_w = get_my_data("Wages")
+        if not df_w.empty:
+            col_config = {
+                "_row_id": None, "StaffCode": None,
+                "Wage": st.column_config.NumberColumn(disabled=True),
+                "Bonus": st.column_config.NumberColumn(disabled=True),
+                "Total": st.column_config.NumberColumn(disabled=True),
+                "WageMonth": st.column_config.TextColumn(disabled=True),
+            }
+            edited_df = st.data_editor(df_w, key="wages_editor", num_rows="dynamic", column_config=col_config, use_container_width=True)
+            if st.button("💾 Vista Breytingar á Launum", type="primary"):
+                with st.status("Vist breytingar...", expanded=True) as status:
+                    changes_count = 0
+                    for index, row in edited_df.iterrows():
+                        row_id = row['_row_id']
+                        d_hrs = float(row['DayHrs'])
+                        e_hrs = float(row['EveHrs'])
+                        sales = int(row['Sales'])
+                        date_val = str(row['Date'])
+                        w, b, t = calculate_pay(d_hrs, e_hrs, sales)
+                        w_mon = get_wage_month(date_val)
+                        update_list = [st.session_state.user_code, date_val, d_hrs, e_hrs, sales, w, b, t, w_mon]
+                        if row_id > 0:
+                            update_row("Wages", row_id, update_list)
+                            changes_count += 1
+                    status.update(label=f"Uppfærði {changes_count} línur!", state="complete")
+                    time.sleep(1); st.rerun()
+        else: st.warning("Engin launagögn.")
+
+    with tab2:
+        df_s = get_my_data("Sales")
+        if not df_s.empty:
+            col_config_s = {"_row_id": None, "StaffCode": None}
+            edited_sales = st.data_editor(df_s, key="sales_editor", column_config=col_config_s, num_rows="dynamic", use_container_width=True)
+            if st.button("💾 Vista Breytingar á Sölu"):
+                for index, row in edited_sales.iterrows():
+                    row_id = row['_row_id']
+                    upd = [st.session_state.user_code, str(row['Timestamp']), str(row['Time']), int(row['Amount']), str(row['Note'])]
+                    if row_id > 0: update_row("Sales", row_id, upd)
+                st.success("Sölur uppfærðar!"); time.sleep(1); st.rerun()
+        else: st.info("Engar sölur.")
