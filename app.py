@@ -44,14 +44,17 @@ MONTH_MAP = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "Maí", 6: "Jún", 7: "J
 @st.cache_resource
 def get_gsheet_client():
     try:
+        # Check for "Foolproof" JSON string first
         if "google_credentials_json" in st.secrets:
             secrets = json.loads(st.secrets["google_credentials_json"])
+        # Fallback to standard TOML
         elif "gcp_service_account" in st.secrets:
             secrets = dict(st.secrets["gcp_service_account"])
             if "private_key" in secrets:
                 secrets["private_key"] = secrets["private_key"].replace("\\n", "\n")
         else:
             return None
+            
         creds = Credentials.from_service_account_info(secrets, scopes=["https://www.googleapis.com/auth/spreadsheets"])
         return gspread.authorize(creds)
     except Exception as e:
@@ -66,7 +69,9 @@ def get_data(worksheet_name):
         ws = sheet.worksheet(worksheet_name)
         data = ws.get_all_records()
         return pd.DataFrame(data)
-    except:
+    except Exception as e:
+        # If worksheet not found, return empty DataFrame but log warning
+        # st.warning(f"Could not load {worksheet_name}: {e}")
         return pd.DataFrame()
 
 def append_row(worksheet_name, row_data):
@@ -98,19 +103,24 @@ def get_wage_month(date_obj):
         return f"{next_month.year}-{next_month.month:02d} ({MONTH_MAP[next_month.month]})"
     return f"{date_obj.year}-{date_obj.month:02d} ({MONTH_MAP[date_obj.month]})"
 
-# --- LOGIN SYSTEM ---
+# --- LOGIN SYSTEM (ROBUST) ---
 def check_login(staff_code):
     df_users = get_data("Users")
+    
     if df_users.empty:
-        st.error("Gat ekki tengst notendagrunni.")
+        st.error("⚠️ Villa: Fann ekki flipann 'Users' eða hann er tómur.")
         return None
     
-    # Ensure code is string for comparison
-    df_users['StaffCode'] = df_users['StaffCode'].astype(str)
-    user_row = df_users[df_users['StaffCode'] == str(staff_code)]
+    # ROBUST FIX: Force everything to string and strip whitespace
+    # This fixes the issue where 101 (number) != "101" (text)
+    df_users['StaffCode'] = df_users['StaffCode'].astype(str).str.strip()
+    clean_code = str(staff_code).strip()
+    
+    user_row = df_users[df_users['StaffCode'] == clean_code]
     
     if not user_row.empty:
         return user_row.iloc[0]['Name']
+    
     return None
 
 # Initialize Session State
@@ -124,22 +134,26 @@ if not st.session_state.logged_in:
     c1, c2, c3 = st.columns([1,1,1])
     with c2:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
-        st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=100)
-        st.title("Innskráning")
-        st.markdown("Sláðu inn starfsmannanúmer (3 tölustafir)")
+        # Using a generic user icon
+        st.markdown("<h1 style='text-align: center;'>🔐</h1>", unsafe_allow_html=True)
+        st.markdown("<h2 style='text-align: center;'>Innskráning</h2>", unsafe_allow_html=True)
         
-        input_code = st.text_input("Starfsmannanúmer", type="password")
-        
-        if st.button("Skrá inn"):
-            with st.spinner("Augnablik..."):
+        with st.form("login_form"):
+            input_code = st.text_input("Starfsmannanúmer", type="password")
+            submitted = st.form_submit_button("Skrá inn")
+            
+            if submitted:
+                # Clear cache to ensure we see the latest Users tab
+                st.cache_resource.clear()
+                
                 name = check_login(input_code)
                 if name:
                     st.session_state.logged_in = True
-                    st.session_state.user_code = str(input_code)
+                    st.session_state.user_code = str(input_code).strip()
                     st.session_state.user_name = name
                     st.rerun()
                 else:
-                    st.error("Rangt númer eða notandi fannst ekki.")
+                    st.error("🚫 Rangt númer eða notandi fannst ekki.")
     st.stop() # Stop here if not logged in
 
 # =========================================================
@@ -148,8 +162,8 @@ if not st.session_state.logged_in:
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title(f"👋 Halló, {st.session_state.user_name}")
-    st.caption(f"Auðkenni: {st.session_state.user_code}")
+    st.title(f"👋 Hæ, {st.session_state.user_name}")
+    st.caption(f"Starfsmaður: {st.session_state.user_code}")
     
     menu = st.radio("Valmynd", ["🔥 Dagurinn í dag", "📊 Mælaborð", "📝 Skrá Vakt", "💾 Gagnagrunnur"])
     
@@ -158,19 +172,20 @@ with st.sidebar:
     monthly_goal = st.number_input("Mánaðarmarkmið:", value=600000, step=50000)
     
     st.markdown("---")
-    if st.button("Útskráning"):
+    if st.button("🚪 Útskráning"):
         st.session_state.logged_in = False
+        st.session_state.user_code = ""
         st.rerun()
 
 # --- FILTER FUNCTION ---
-# This ensures users only see THEIR data
 def get_my_data(tab_name):
     df = get_data(tab_name)
     if df.empty: return df
     
     # Filter by logged in user code
     if 'StaffCode' in df.columns:
-        df['StaffCode'] = df['StaffCode'].astype(str)
+        # Convert to string to match session state format
+        df['StaffCode'] = df['StaffCode'].astype(str).str.strip()
         return df[df['StaffCode'] == st.session_state.user_code]
     return df
 
@@ -196,17 +211,21 @@ if menu == "🔥 Dagurinn í dag":
     st.progress(prog)
     
     st.markdown("### ➕ Skrá nýja sölu")
-    with st.form("add_sale"):
-        c1, c2 = st.columns([2,1])
-        amt = c1.number_input("Upphæð", step=1000)
-        note = c2.text_input("Skýring")
-        if st.form_submit_button("Vista"):
-            now = datetime.now()
-            # Row: StaffCode, Timestamp, Time, Amount, Note
-            row = [st.session_state.user_code, str(now), now.strftime("%H:%M"), amt, note]
-            append_row("Sales", row)
-            st.success("Skráð!")
-            st.rerun()
+    with st.container():
+        with st.form("add_sale"):
+            c1, c2 = st.columns([2,1])
+            with c1:
+                amt = st.number_input("Upphæð", step=1000)
+            with c2:
+                note = st.text_input("Skýring")
+            
+            if st.form_submit_button("Vista"):
+                now = datetime.now()
+                # Row: StaffCode, Timestamp, Time, Amount, Note
+                row = [st.session_state.user_code, str(now), now.strftime("%H:%M"), amt, note]
+                append_row("Sales", row)
+                st.success("Skráð!")
+                st.rerun()
             
     if not today_sales.empty:
         st.dataframe(today_sales[['Time', 'Amount', 'Note']].sort_values('Time', ascending=False), use_container_width=True, hide_index=True)
@@ -218,25 +237,29 @@ elif menu == "📊 Mælaborð":
     
     if not df_wages.empty and 'WageMonth' in df_wages.columns:
         months = sorted(df_wages['WageMonth'].unique().tolist(), reverse=True)
-        sel_m = st.selectbox("Mánuður", months)
-        m_data = df_wages[df_wages['WageMonth'] == sel_m]
-        
-        if not m_data.empty:
-            tot_pay = m_data['Total'].sum()
-            tot_bonus = m_data['Bonus'].sum()
+        if months:
+            sel_m = st.selectbox("Mánuður", months)
+            m_data = df_wages[df_wages['WageMonth'] == sel_m]
             
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Heildarlaun", f"{tot_pay:,.0f}")
-            c2.metric("Bónusar", f"{tot_bonus:,.0f}")
-            c3.metric("Vaktir", len(m_data))
-            
-            st.progress(min(1.0, tot_pay/monthly_goal))
-            
-            # Chart
-            m_data['DateObj'] = pd.to_datetime(m_data['Date'])
-            m_data = m_data.sort_values('DateObj')
-            fig = px.bar(m_data, x='Date', y=['Wage', 'Bonus'], title="Launaþróun", color_discrete_map={'Wage': '#29B6F6', 'Bonus': '#66BB6A'})
-            st.plotly_chart(fig, use_container_width=True)
+            if not m_data.empty:
+                tot_pay = m_data['Total'].sum()
+                tot_bonus = m_data['Bonus'].sum()
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Heildarlaun", f"{tot_pay:,.0f}")
+                c2.metric("Bónusar", f"{tot_bonus:,.0f}")
+                c3.metric("Vaktir", len(m_data))
+                
+                st.progress(min(1.0, tot_pay/monthly_goal))
+                
+                # Chart
+                if 'Date' in m_data.columns:
+                    m_data['DateObj'] = pd.to_datetime(m_data['Date'])
+                    m_data = m_data.sort_values('DateObj')
+                    fig = px.bar(m_data, x='Date', y=['Wage', 'Bonus'], title="Launaþróun", color_discrete_map={'Wage': '#29B6F6', 'Bonus': '#66BB6A'})
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Engin gögn fundust fyrir mánuði.")
     else:
         st.info("Engin gögn fundust.")
 
